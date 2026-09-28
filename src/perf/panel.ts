@@ -8,8 +8,6 @@ import type { GpuTimer } from './timer';
 import type { SortMode } from '../sort/protocol';
 
 export interface PanelInfo {
-  lighting: string;
-  rays: string;
   drawn: number;
   sceneW: number;
   sceneH: number;
@@ -21,19 +19,13 @@ export interface PanelHandlers {
   sortMode(mode: SortMode): void;
   projection(tangential: boolean): void;
   adaptive(on: boolean): void;
-  lighting(on: boolean): void;
-  bloom(on: boolean): void;
   opened(open: boolean): void;
 }
 
 const ROWS = [
   ['display', 'Display'],
   ['scale', 'Render scale'],
-  ['budget', 'Ray budget'],
-  ['rays', 'Rays per splat'],
-  ['lighting', 'Lighting'],
   ['cutoff', 'Detail cutoff'],
-  ['bloom', 'Bloom'],
   ['drawn', 'Splats drawn'],
   ['sort', 'Depth sort'],
   ['change', 'Last adjustment'],
@@ -117,8 +109,6 @@ export class PerfPanel {
       box.addEventListener('change', () => fn(box.checked));
     };
     bind('pf-adaptive', governor.adaptive, handlers.adaptive);
-    bind('pf-rt', true, handlers.lighting);
-    bind('pf-bloom', governor.bloomWanted, handlers.bloom);
   }
 
   update(): void {
@@ -149,11 +139,7 @@ export class PerfPanel {
     };
     set('display', `${g.refreshHz} Hz · target ${g.targetFps} fps`);
     set('scale', `${Math.round(k.scale * 100)} % · ${info.sceneW}×${info.sceneH}`);
-    set('budget', `${k.rtRows} rows · ${compact(k.rtRows * 1024)} splats/frame`);
-    set('rays', info.rays);
-    set('lighting', info.lighting);
     set('cutoff', k.minPx ? `Under ${k.minPx} px skipped` : 'Off');
-    set('bloom', k.bloom ? 'On' : 'Off');
     set('drawn', compact(info.drawn));
     set('sort', info.sort);
     set('change', g.lastChange);

@@ -37,7 +37,7 @@ createServer(async (req, res) => {
       res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${body.length}`, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' }).end(body.subarray(start, end + 1));
       return;
     }
-    res.writeHead(200, { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' }).end(body);
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' }).end(body);
   } catch {
     res.writeHead(404).end('Not found');
   }

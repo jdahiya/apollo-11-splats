@@ -7,17 +7,10 @@
  */
 export type SortMode = 'distance' | 'depth';
 
-/** A range of splats that moves as one rigid body: start, end and a column-major 4×4 transform. */
-export interface Rigid {
-  start: number;
-  end: number;
-  m: number[];
-}
-
 export type SortRequest =
   | { type: 'boot'; wasmUrl: string }
   | { type: 'init'; n: number; pos: Float32Array }
-  | { type: 'sort'; mode: SortMode; row: [number, number, number, number]; eye: [number, number, number]; gen: number; rigid: Rigid | null };
+  | { type: 'sort'; mode: SortMode; row: [number, number, number, number]; eye: [number, number, number]; gen: number };
 
 export type SortReply =
   | { type: 'booted'; wasm: boolean }

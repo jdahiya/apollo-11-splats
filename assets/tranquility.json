@@ -1,0 +1,9 @@
+{
+  "splats": 2000000,
+  "levels": {
+    "light": 800000,
+    "standard": 1400000,
+    "full": 2000000
+  },
+  "lightFile": "tranquility-light.spz"
+}

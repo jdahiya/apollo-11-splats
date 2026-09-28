@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Apollo 11 Splats</title>
-<meta name="description" content="A WebGL2 + WebAssembly Gaussian splat model of the Apollo 11 landing site, Tranquility Base, with a replay of Eagle's landing and path-traced lunar lighting.">
+<meta name="description" content="A 3D Gaussian splat model of Tranquility Base, the Apollo 11 landing site, trained from the Hasselblad photographs Armstrong and Aldrin took on the surface. WebGL2 + WebAssembly.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@500;600&family=IBM+Plex+Mono:wght@400;500&family=Saira+Condensed:wght@600;700;800&display=swap">
@@ -12,12 +12,17 @@
 <script type="module" src="main.js"></script>
 </head>
 <body>
-<canvas id="view" aria-label="3D view of the Apollo 11 landing site built from Gaussian splats"></canvas>
+<canvas id="view" aria-label="3D view of the Apollo 11 landing site, a Gaussian splat model trained from the mission photographs"></canvas>
+
+<figure id="photo" class="photo" hidden>
+  <img id="photo-img" alt="">
+  <figcaption id="photo-id"></figcaption>
+</figure>
 
 <header class="plate">
   <div class="coords">0.6741° N · 23.4730° E · SEA OF TRANQUILITY</div>
   <h1>Apollo <span>11</span></h1>
-  <p id="subtitle">Gaussian splats · Tranquility Base</p>
+  <p id="subtitle">Gaussian splats · trained from the mission photographs</p>
 </header>
 
 <div class="readout">
@@ -26,11 +31,10 @@
     <span id="st-sortlabel">Sort</span><b id="st-sort">–</b>
     <span>Frame</span><b id="st-fps">–</b>
   </div>
-  <div class="seg" role="group" aria-label="Splat density">
-    <button id="q-light" data-q="0.5" aria-pressed="false">Light</button>
-    <button id="q-std" data-q="1" aria-pressed="true">Standard</button>
-    <button id="q-high" data-q="2" aria-pressed="false">High</button>
-    <button id="q-ultra" data-q="3.4" aria-pressed="false">Ultra</button>
+  <div class="seg" id="levels" role="group" aria-label="Detail">
+    <button data-level="light" aria-pressed="false">Light</button>
+    <button data-level="standard" aria-pressed="false">Standard</button>
+    <button data-level="full" aria-pressed="false">Full</button>
   </div>
   <div class="tools">
     <label class="filebtn">Open capture<input id="file" type="file" accept=".ply,.splat,.spz,.glb,.gltf"></label>
@@ -81,44 +85,39 @@
       </select>
       <label for="pf-proj">Projection</label>
       <select id="pf-proj">
-        <option value="tangential">Tangential (OpenUSD, RealityKit)</option>
         <option value="perspective">Perspective (original 3DGS, glTF)</option>
+        <option value="tangential">Tangential (OpenUSD, RealityKit)</option>
       </select>
       <label class="check"><input type="checkbox" id="pf-adaptive"> Adaptive quality</label>
-      <label class="check"><input type="checkbox" id="pf-rt"> Ray-traced lighting</label>
-      <label class="check"><input type="checkbox" id="pf-bloom"> Bloom</label>
     </div>
     <p class="fine">Power and battery figures are estimates from GPU and CPU load for a typical device of this kind. Browsers don't report real power draw. Where the browser reports the battery level, a measured drain appears once it drops. When nothing on screen is changing, rendering stops completely.</p>
   </section>
 </div>
 
+<p id="caption" class="caption" hidden></p>
+
 <nav class="stations" id="stations" aria-label="Camera stations">
   <div class="group">
-    <span class="glabel">Site</span>
-    <button data-view="overview">Overview</button>
-    <button data-view="eagle">Eagle</button>
-    <button data-view="crater">Little West</button>
-    <button data-view="earth">Earth</button>
-  </div>
-  <div class="group">
-    <span class="glabel">Moonwalk</span>
+    <span class="glabel">Where the photos were taken</span>
+    <!-- STATION-BUTTONS:BEGIN (written by tools/stations.mjs) -->
     <button data-view="ladder">Ladder</button>
-    <button data-view="tv">TV camera</button>
+    <button data-view="hatch">Hatch</button>
+    <button data-view="window">Window</button>
+    <button data-view="eagle">Eagle</button>
+    <button data-view="wind">Solar wind</button>
     <button data-view="flag">Flag</button>
-    <button data-view="science">Experiments</button>
+    <button data-view="shadow">Shadow</button>
+    <button data-view="footpad">Footpad</button>
+    <button data-view="portrait">Portrait</button>
+    <!-- STATION-BUTTONS:END -->
   </div>
-  <div class="group">
-    <label class="glabel" for="sun">Sun</label>
-    <input id="sun" type="range" min="4" max="40" step="1" value="14">
-    <output id="sun-out" for="sun">14°</output>
-    <button id="land">Landing</button>
-  </div>
+  <button id="compare" hidden aria-pressed="false">Compare with photo</button>
   <button id="tour" aria-pressed="false">Play tour</button>
 </nav>
 
-<div class="hint">Drag to orbit · right-drag to pan<br>Scroll to fly in · WASD + Q/E to move<br>Modelled from NASA's Apollo 11 footage, not scanned</div>
+<div class="hint">Drag to orbit · right-drag to pan<br>Scroll to fly in · WASD + Q/E to move<br>Trained from NASA's Hasselblad photographs</div>
 
-<div id="loading"><div><strong id="loading-title">Placing splats</strong><span id="loading-msg">Building Tranquility Base…</span></div></div>
+<div id="loading"><div><strong id="loading-title">Loading</strong><span id="loading-msg">Tranquility Base…</span></div></div>
 <div id="drop" hidden>Drop a .ply, .splat, .spz or .glb capture</div>
 <div id="toast" role="status" hidden></div>
 </body>

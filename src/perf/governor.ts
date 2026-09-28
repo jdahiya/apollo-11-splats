@@ -1,9 +1,8 @@
 // Adaptive quality. 60 fps is the floor; the display's refresh rate is the ceiling.
-// Every half second it looks at recent frames. Above 60 fps it only trades the ray budget, which
-// the eye can't see, to reach a faster display's refresh rate. The render scale, fine splats and
-// bloom only give way when frames stay under 60 fps, one step at a time: after two slow windows
-// in a row, and a scale that proved too slow isn't tried again for 20 seconds. Hunting back and
-// forth would make the whole picture pop.
+// Every half second it looks at recent frames. The render scale and the fine splats only give way
+// when frames stay under 60 fps, one step at a time: after two slow windows in a row, and a
+// scale that proved too slow isn't tried again for 20 seconds. Hunting back and forth would make
+// the whole picture pop.
 
 export type Pacing = 'display' | 'floor' | 'saver';
 
@@ -14,13 +13,8 @@ export interface Knobs {
   maxScale: number;
   /** Device-pixel-ratio cap for the canvas. */
   dpr: number;
-  /** Rows of 1024 splats re-lit per frame while lighting refines. */
-  rtRows: number;
-  rtMin: number;
-  rtMax: number;
   /** Splats smaller than this many pixels are skipped. */
   minPx: number;
-  bloom: boolean;
 }
 
 const COMMON_HZ = [48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360];
@@ -29,7 +23,6 @@ const FLOOR_FPS = 60;
 export class Governor {
   pacing: Pacing = 'display';
   adaptive = true;
-  bloomWanted = true;
   refreshHz = 60;
   lastChange = 'Starting up';
 
@@ -76,7 +69,7 @@ export class Governor {
     this.gpuN++;
   }
 
-  evaluate(now: number, rtActive: boolean): void {
+  evaluate(now: number): void {
     if (!this.windowStart) this.windowStart = now;
     if (now - this.windowStart < 450 || this.intervals.length < 12) return;
     const sorted = this.intervals.sort((a, b) => a - b);
@@ -92,26 +85,19 @@ export class Governor {
     const floorMs = 1000 / FLOOR_FPS, targetMs = 1000 / this.targetFps;
     const timed = Number.isFinite(gpu);
     const belowFloor = median > floorMs * 1.06 || p90 > floorMs * 1.25;
-    const belowTarget = timed ? gpu > targetMs * 0.9 : median > targetMs * 1.12;
     const roomy = timed ? gpu < targetMs * 0.55 && median < targetMs * 1.05 : median < targetMs * 1.04 && p90 < targetMs * 1.3;
 
     if (belowFloor) {
       this.easy = 0;
-      this.slow++;
-      // The ray budget goes first and at once; what you can see only after a second slow window.
-      if (!this.lowerBudget(rtActive) && this.slow >= 2) {
-        this.lowerVisible(now);
+      if (++this.slow >= 2) {
+        this.lower(now);
         this.slow = 0;
       }
-      this.coolUntil = now + 3000;
-    } else if (belowTarget && this.pacing === 'display' && this.targetFps > FLOOR_FPS) {
-      this.slow = this.easy = 0;
-      this.lowerBudget(rtActive);
       this.coolUntil = now + 3000;
     } else if (roomy && now > this.coolUntil) {
       this.slow = 0;
       if (++this.easy >= 3) {
-        this.raise(now, rtActive);
+        this.raise(now);
         this.easy = 0;
         this.coolUntil = now + 1200;
       }
@@ -120,17 +106,8 @@ export class Governor {
     }
   }
 
-  /** Halves the ray budget; false when it's already at the minimum (or nothing is being traced). */
-  private lowerBudget(rtActive: boolean): boolean {
-    const k = this.knobs;
-    if (!rtActive || k.rtRows <= k.rtMin) return false;
-    k.rtRows = Math.max(k.rtMin, Math.floor(k.rtRows / 2));
-    this.lastChange = 'Lowered ray budget';
-    return true;
-  }
-
-  /** Only when under 60 fps: render scale, then sub-pixel splats (which fade), then bloom (which fades). */
-  private lowerVisible(now: number): void {
+  /** Only when under 60 fps: render scale first, then sub-pixel splats (which fade). */
+  private lower(now: number): void {
     const k = this.knobs;
     if (k.scale > k.minScale + 1e-3) {
       this.tooSlowScale = k.scale;
@@ -140,26 +117,17 @@ export class Governor {
     } else if (k.minPx < 2) {
       k.minPx += 0.5;
       this.lastChange = 'Fading out sub-pixel splats';
-    } else if (k.bloom) {
-      k.bloom = false;
-      this.lastChange = 'Bloom off';
     }
   }
 
-  private raise(now: number, rtActive: boolean): void {
+  private raise(now: number): void {
     const k = this.knobs, next = round2(k.scale + 0.1);
-    if (!k.bloom && this.bloomWanted) {
-      k.bloom = true;
-      this.lastChange = 'Bloom back on';
-    } else if (k.minPx > 0) {
+    if (k.minPx > 0) {
       k.minPx = Math.max(0, k.minPx - 0.5);
       this.lastChange = 'Restored fine splats';
     } else if (k.scale < k.maxScale - 1e-3 && (next < this.tooSlowScale - 1e-3 || now > this.tooSlowUntil)) {
       k.scale = Math.min(k.maxScale, next);
       this.lastChange = 'Raised render scale';
-    } else if (rtActive && k.rtRows < k.rtMax) {
-      k.rtRows = Math.min(k.rtMax, k.rtRows * 2);
-      this.lastChange = 'Raised ray budget';
     }
   }
 }

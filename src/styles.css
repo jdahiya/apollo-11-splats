@@ -119,14 +119,29 @@ button[aria-pressed="true"] { background: var(--text); color: var(--ink); border
 }
 .group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .glabel { font: 500 10px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
-#sun { width: 120px; accent-color: var(--oil); }
-#sun-out { font: 500 12px/1 var(--mono); font-variant-numeric: tabular-nums; min-width: 4ch; }
-#land { border-color: rgba(242, 181, 58, 0.6); color: var(--oil-hi); }
-#land:hover { background: rgba(217, 154, 28, 0.16); }
-#tour { background: var(--oil); border-color: var(--oil); color: #fff; margin-left: auto; }
+#compare { border-color: rgba(242, 181, 58, 0.6); color: var(--oil-hi); }
+#compare:hover { background: rgba(217, 154, 28, 0.16); }
+#compare[aria-pressed="true"] { background: var(--oil); color: #fff; border-color: var(--oil); }
+#compare { margin-left: auto; }
+#tour { background: var(--oil); border-color: var(--oil); color: #fff; }
+#compare[hidden] + #tour { margin-left: auto; }
 #tour:hover { background: var(--oil-hi); }
 #tour[aria-pressed="true"] { background: transparent; color: var(--oil-hi); border-color: var(--oil); }
 .stations.custom .group { display: none; }
+
+/* What the station shows, just above the stations bar. */
+.caption {
+  position: fixed; left: 16px; bottom: calc(env(safe-area-inset-bottom, 0px) + 78px); margin: 0; max-width: min(62ch, calc(100% - 32px));
+  font: 500 13px/1.45 var(--body); color: #d5deea; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.9); pointer-events: none;
+}
+
+/* The original photograph, over the view at the same field of view and turned to match its roll. */
+.photo { position: fixed; inset: 0; margin: 0; display: grid; place-items: center; pointer-events: none; overflow: hidden; }
+.photo img { height: 100%; width: auto; max-width: none; display: block; }
+.photo figcaption {
+  position: absolute; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 18px); transform: translateX(-50%);
+  font: 400 11px/1 var(--mono); letter-spacing: 0.08em; color: #fff; background: rgba(7, 11, 20, 0.7); padding: 6px 9px; border-radius: 3px;
+}
 
 .hint { position: fixed; right: 16px; bottom: calc(env(safe-area-inset-bottom, 0px) + 22px); font: 400 11px/1.5 var(--mono); color: var(--muted); text-align: right; pointer-events: none; max-width: 30ch; }
 
@@ -147,6 +162,6 @@ button[aria-pressed="true"] { background: var(--text); color: var(--ink); border
   .stations { gap: 8px; padding: 8px; }
   button, .filebtn { padding: 8px 9px; font-size: 11px; }
   #tour { margin-left: 0; }
-  #sun { width: 96px; }
+  .caption { bottom: calc(env(safe-area-inset-bottom, 0px) + 150px); font-size: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { button { transition: none; } }

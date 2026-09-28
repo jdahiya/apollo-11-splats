@@ -1,6 +1,6 @@
 // Main-thread side of the sort worker: asks for a new order when the camera has moved enough to
 // change it, and hands back each finished order.
-import type { Rigid, SortMode, SortReply, SortRequest } from './protocol';
+import type { SortMode, SortReply, SortRequest } from './protocol';
 import type { Vec3 } from '../util/math';
 
 export type DepthRow = readonly [number, number, number, number];
@@ -17,9 +17,6 @@ export class Sorter {
   private count = 0;
   private readonly sentRow = new Float64Array(4).fill(NaN);
   private readonly sentEye = new Float64Array(3).fill(NaN);
-  /** A range of splats moving as one rigid body (Eagle during the landing), or null. */
-  private rigid: Rigid | null = null;
-  private rigidChanged = false;
 
   constructor(
     private readonly onSorted: (order: Uint32Array, ms: number) => void,
@@ -49,13 +46,6 @@ export class Sorter {
     this.post({ type: 'init', n: count, pos: positions }, [positions.buffer]);
   }
 
-  /** Tells the sort where a rigid range has moved to; null puts it back at rest. */
-  setRigid(rigid: Rigid | null): void {
-    if (!rigid && !this.rigid) return;
-    this.rigid = rigid;
-    this.rigidChanged = true;
-  }
-
   setMode(mode: SortMode): void {
     this.mode = mode;
     this.invalidate();
@@ -64,9 +54,7 @@ export class Sorter {
   /** Requests a re-sort if the view moved enough to change the order and no sort is in flight. */
   request(row: DepthRow, eye: Vec3): void {
     if (this.busy || !this.count) return;
-    if (this.rigidChanged) {
-      this.rigidChanged = false;
-    } else if (this.mode === 'distance') {
+    if (this.mode === 'distance') {
       const e = this.sentEye;
       // Rotation alone never changes a distance order; only moving the camera does.
       if (Math.hypot(eye[0] - e[0]!, eye[1] - e[1]!, eye[2] - e[2]!) <= 0.02) return;
@@ -78,7 +66,7 @@ export class Sorter {
     this.sentRow.set(row);
     this.sentEye.set(eye);
     this.busy = true;
-    this.post({ type: 'sort', mode: this.mode, row: [row[0], row[1], row[2], row[3]], eye: [eye[0], eye[1], eye[2]], gen: this.gen, rigid: this.rigid });
+    this.post({ type: 'sort', mode: this.mode, row: [row[0], row[1], row[2], row[3]], eye: [eye[0], eye[1], eye[2]], gen: this.gen });
   }
 
   private invalidate(): void {

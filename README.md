@@ -1,49 +1,45 @@
 # Apollo 11 Splats
 
-A real-time 3D Gaussian splat model of Tranquility Base, the Apollo 11 landing site, with a replay of Eagle's landing. It's lit by progressive path tracing and runs in any browser with WebGL2, from phones to desktops.
+A 3D Gaussian splat model of Tranquility Base, the Apollo 11 landing site, trained from the photographs Armstrong and Aldrin took there on 20 July 1969. It runs in any browser with WebGL2, from phones to desktops.
 
 **Live demo:** https://jdahiya.github.io/apollo-11-splats/
 
-- **Eagle:** the lunar module as it stood on 20 July 1969. The octagonal descent stage is wrapped in crinkled gold and black foil, and every crinkle tips its splats' normal its own way, so the foil glints as you move. The four legs have their struts and footpads, and the front leg has the ladder, the porch and the plaque. The descent engine bell sits underneath, and the grey-and-black ascent stage above has its triangular windows, hatch, propellant tanks, thruster quads and antennas.
-- **The moonwalk:** the flag, rippled the way it hung because its crossbar never fully extended. Aldrin salutes beside it, and Armstrong stands off to one side with the camera. There's the seismometer with its solar panels, the laser reflector tilted toward Earth, the solar-wind foil turned to the sun, and the TV camera on its tripod with its cable running back to Eagle. Footprints follow the routes they walked, including one crisp bootprint.
-- **The site:** grey regolith pocked with craters of every size, with Little West crater 60 m east of Eagle and West crater, which Eagle flew over, further out. Rocks are scattered everywhere, and the ground under Eagle is streaked by its engine. The Moon's curvature brings the horizon close.
-- **The sky:** black, with the sun's disc and faint stars. Earth hangs about 66° up in the west, a little over half lit.
-- **Landing:** replays the descent. Eagle comes in from 460 m east and 150 m up, pitched back to brake, then straightens and settles while its engine blows a sheet of dust out across the ground. Then the replay skips ahead six and a half hours to the moonwalk.
-- **Sun:** the slider moves the sun from lunar dawn toward noon. Apollo 11 landed with it about 11° up in the east; by the end of the moonwalk it was about 14°.
+Nothing in the scene is modelled or painted by hand. Every colour comes from the Hasselblad film: the model is 3D Gaussian Splatting (Kerbl et al. 2023), trained on 60 of the mission's colour photographs, with each photo's camera position recovered by structure from motion. What you see is Eagle's gold and black foil, the ladder, the footpads, the flag and the trampled regolith as the film recorded them, in the low morning sunlight of the moonwalk.
 
-The model is procedural. It's generated at load time from the mission's records and NASA's footage, not scanned. You can also open a trained `.ply`, `.splat`, `.spz` or `.glb` capture in the same viewer.
+- **Photo stations** stand exactly where a photograph was taken, with the Hasselblad's field of view. **Compare with photo** lays the original frame over the view, turned to the camera's tilt, so you can check the model against the film.
+- **Play tour** flies round the stations, pausing at each.
+- **Detail** chooses how many splats are drawn, most important first: Light (the default on phones), Standard or Full (the default elsewhere).
+- **Open capture** loads any other `.ply`, `.splat`, `.spz` or `.glb` splat capture into the same viewer.
 
 ## Built from
 
-- NASA's [Apollo 11 HD videos](https://www.nasa.gov/history/apollo-11-hd-videos/), used as visual reference. The TV camera on Eagle's equipment bay filmed the ladder, and the one set up about 20 m north filmed the flag raising. Those clips fix the site's layout and the look of Eagle, the suits and the ground in low sunlight. The **Ladder** and **TV camera** stations frame the scene the way those cameras did. `node tools/fetch-reference.mjs` downloads the clips into `reference/`, which is git-ignored and isn't part of the site.
-- Published mission facts: the landing site's coordinates, the sun's elevation, and the lunar module's dimensions, colours and layout.
+- NASA's Apollo 11 Hasselblad photographs, magazine 40 (AS11-40-5844 to 5969), the colour magazine used on the moonwalk, in the high-resolution scans published by the [Apollo Lunar Surface Journal](https://apollojournals.org/alsj/a11/images11.html). `node tools/fetch-photos.mjs` downloads them into `reference/`, which is git-ignored.
+- NASA's [Apollo 11 HD videos](https://www.nasa.gov/history/apollo-11-hd-videos/), as visual reference. They can't be trained on: the TV and film cameras were fixed in place, so the footage has no parallax to recover depth from, and the TV pictures are black and white. `node tools/fetch-reference.mjs` downloads them.
+
+## How it was made
+
+1. **Masks.** A 5 × 5 grid of fine crosses (the réseau) is etched on every frame at the same place; left in, they'd train as objects floating in front of every camera. `tools/reseau-masks.ps1` finds the grid in each scan and masks it. Things that moved between photos are masked out of training too: Aldrin, the photographer's shadow, the core tube and lens flares, traced by hand in `tools/transients.json` and painted in by `tools/paint-transients.ps1`. So Aldrin doesn't leave ghosts: the model fills in the ladder behind him from the photos where he wasn't in the way.
+2. **Camera poses.** [COLMAP](https://colmap.github.io/) 4.2 recovers where each photo was taken. The lens is known: a 60 mm Biogon, which is exactly six réseau pitches (the crosses are 10 mm apart on the film), and the principal point is the centre cross. Features are SIFT with affine shape and domain-size pooling, matched exhaustively. A second, looser matching pass adds only pairs that also fit the calibrated (essential-matrix) model. Of the 123 frames, 82 end up in one reconstruction; the rest (close-ups of bootprints, panoramas out by the craters, the shot of Earth) share too little with it. Then every camera is checked against what the photographers could have done: the Hasselblad was chest-mounted, so surface photos must sit about 1.4 m above the ground, and the frames shot through Eagle's window must sit about 5 m up (they do). The 22 frames placed anywhere else were dropped.
+3. **Training.** [Brush](https://github.com/ArthurBrussee/brush) trains the splats on the 60 remaining photos at full scan resolution: 30,000 steps on an RTX 4090.
+4. **Site frame.** `tools/align-site.mjs` turns the reconstruction's arbitrary frame into metres, with y up, x east, z south and Eagle's base at the origin. Up is the ground plane, scale comes from the 1.4 m camera height, and Eagle's position from its gold foil. North comes from the sun: lens flares and shadows in several photos put it at azimuth 89°, just north of east, and with that heading Eagle's long shadow falls over the places where the photos show the photographer standing in it.
+5. **For the web.** `tools/ply-to-spz.mjs` moves the trained splats into the site frame, rotating their view-dependent colour to match, and writes Niantic's compressed SPZ format. It ranks the splats by how much each one covered in the photos (opacity times its largest footprint in any training frame, in pixels), keeps the top two thirds and orders them so each detail level draws the most important first. The Light level is also written as a file of its own, so phones download well under half as much. `tools/stations.mjs` turns the chosen photos' camera poses into the stations, and `tools/station-photos.ps1` exports the frames for the compare overlay.
+
+### What it can't show
+
+Only what the photographs saw is in the model, and it's sharpest near where they were taken. The far sides of Eagle, the experiments south of it and Little West crater were photographed from places whose photos couldn't be tied into the same reconstruction, so they're missing or soft. Fly away from the stations and the splats get patchy, with streaks where the ground was only ever seen at a glancing angle. The model is a record of the film, not a rebuild of the site.
 
 ## How it works
 
-It runs on the same engine as [Rogers Place Splats](https://github.com/jdahiya/rogers-place-splats):
-- The splat renderer follows the 3D Gaussian Splatting reference and `KHR_gaussian_splatting`, with the tangential projection from OpenUSD and RealityKit as the default.
-- A WebAssembly depth sort runs in a worker.
-- Path-traced lighting uses voxel radiance caches.
-- An adaptive governor holds 60 fps or more.
+- The renderer follows the 3D Gaussian Splatting reference and `KHR_gaussian_splatting`: EWA projection with a 0.3-pixel dilation, alpha capped at 0.99 and cut off under 1/255, and view-dependent colour from spherical harmonics. The tangential projection from OpenUSD and RealityKit is in the Performance panel too.
+- A WebAssembly counting sort orders the splats back to front in a worker, by camera distance (the glTF default) or view depth (the original 3DGS).
+- An adaptive governor holds 60 fps or more. Render scale and sub-pixel splats only give way below 60 fps, one step at a time, and fade rather than pop. Rendering stops when nothing on screen changes.
+- The **Performance** panel shows frame times, GPU time, and estimated power and battery drain.
 
-On top of that:
-
-| Piece | Where | What it does |
-| --- | --- | --- |
-| Lunar light | `src/render/shaders/trace.glsl`, `sky.glsl` | No sky light: rays that escape see black space, so shadows are lit only by sunlight thrown back off the ground and off Eagle. The ground is lit one-sided, so slopes turned away from a low sun fall dark. |
-| Opposition surge | `src/render/shaders/splat.vert` | Lunar soil throws light back toward the sun. It's brightest looking straight down-sun, round your own shadow, and darker looking into the sun. |
-| Layers | `src/scene/build.ts` | The scene is built in layers by splat index: the ground, rocks and Earth, the moonwalk's things, Eagle, and the landing dust. The shader and the lighting treat each one differently. |
-| Landing | `src/world/landing.ts` | During the replay, Eagle's splats move as one rigid body. The vertex shader transforms them, and the sort worker moves their positions before each sort, so the order stays right. The dust is animated entirely in the shader. |
-| Eagle's shadow | `splat.vert` | The baked lighting of everything else leaves Eagle out. Its shadow is traced live against a simple stand-in for its shape, wherever it is, so the shadow moves with it during the landing. |
-| Reflections | `splat.vert` | The foil, the visors, the solar-wind sheet and the solar panels reflect the black sky and the bright ground, weighted by Fresnel. |
-
-## Stations and links
-
-**Overview**, **Eagle**, **Little West** and **Earth** show the site. **Ladder**, **TV camera**, **Flag** and **Experiments** show the moonwalk. **Play tour** flies round them all.
-
-- `?eye=x,y,z&look=x,y,z` opens at a camera position (metres, y up, x east, z south, Eagle at the origin).
-- `?sun=degrees` sets the sun's height.
-- `?capture=<url>` opens a capture.
+| Link | Opens |
+| --- | --- |
+| `?station=name` | at a station (`ladder`, `flag`, …) |
+| `?eye=x,y,z&look=x,y,z` | at a camera position (site metres: y up, x east, z south, Eagle at the origin) |
+| `?capture=<url>` | another capture |
 
 | Input | Action |
 | --- | --- |
@@ -55,37 +51,32 @@ On top of that:
 | Shift | Move faster |
 | Pinch (touch) | Zoom and pan |
 
-## Performance
-
-60 fps is the floor, and the display's refresh rate is the ceiling. To reach a faster display's refresh rate the governor only trades the ray budget. Render scale, fine splats and bloom only give way below 60 fps, one step at a time, and they fade rather than pop. Rendering stops when nothing on screen changes. Phones start at a lighter density with coarser voxels. The **Performance** panel shows frame times, GPU time, and estimated power and battery drain.
-
 ## Development
 
-Requires Node 20 or newer.
+Requires Node 22.15 or newer (the SPZ encoder uses zstd from `node:zlib`).
 
 ```bash
 npm install
-npm run build      # AssemblyScript -> dist/sort.wasm, TypeScript -> dist/main.js
+npm run build      # AssemblyScript -> dist/sort.wasm, TypeScript -> dist/main.js, assets copied
 npm run serve      # http://localhost:8080
 ```
 
-`npm run dev` rebuilds on change, `npm run typecheck` runs `tsc`, and `npm test` checks the WebAssembly sort and the capture importers.
+`npm run dev` rebuilds on change, `npm run typecheck` runs `tsc`, and `npm test` checks the WebAssembly sort, the capture importers and the SPZ encoder.
 
 ```
 assembly/sort.ts        WebAssembly depth sort (AssemblyScript)
-src/main.ts             entry point: frame loop and UI wiring
-src/scene/              the ground and craters, Eagle, the moonwalk, Earth
-src/world/              the sun, and the landing replay
-src/render/             WebGL2 renderer, voxel grids, path-traced lighting, GLSL shaders
-src/splats/             splat storage, shape primitives, capture import
+assets/                 the trained model (SPZ), its detail levels, and the station photographs
+src/main.ts             entry point: loading, frame loop and interface
+src/render/             WebGL2 renderer and GLSL shaders
+src/splats/             splat storage and capture importers
 src/sort/               sort worker and its main-thread client
-src/camera/             orbit camera, input, stations and the tour
+src/camera/             orbit camera, input, the photo stations and the tour
 src/perf/               governor, GPU timer, power model, stats, charts, panel
-tools/                  build script, dev server, tests, reference download
+tools/                  build, dev server, tests, and the training pipeline's scripts
 ```
 
 Pushing to `main` builds and deploys the site to GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Not affiliated
 
-This is an independent project. It is not affiliated with or endorsed by NASA. NASA's footage is used as modelling reference only and isn't included in the site, and the site uses no NASA insignia.
+This is an independent project. It is not affiliated with or endorsed by NASA. The photographs it's trained on, and the frames shown in the compare overlay, are NASA's and in the public domain.

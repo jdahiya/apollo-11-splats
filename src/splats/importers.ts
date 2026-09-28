@@ -6,7 +6,7 @@
 // Everything is converted into the viewer's axes: x right, y up, z toward the viewer (RUB).
 import { decompress as zstdDecompress } from 'fzstd';
 import { fromHalf, toHalf } from '../util/half';
-import { SH_COEFFS, allocateSh, asset, put, resetAsset, setJitter, store } from './store';
+import { SH_COEFFS, allocateSh, asset, put, resetAsset, store } from './store';
 
 const SH_C0 = 0.28209479177387814;
 
@@ -26,12 +26,10 @@ function covFromQuat(w: number, x: number, y: number, z: number, sx: number, sy:
 }
 
 /** Starts a fresh capture: clears the store and per-asset settings. */
-function begin(count: number): () => void {
+function begin(count: number): void {
   store.count = 0;
   store.reserve(count);
   resetAsset();
-  const old = setJitter(0);
-  return () => setJitter(old);
 }
 
 function putSh(i: number, k: number, rgb: readonly [number, number, number]): void {
@@ -94,7 +92,7 @@ export function parsePly(buf: ArrayBuffer): void {
   };
   const [x, y, z] = ['x', 'y', 'z'].map(field) as [(i: number) => number, (i: number) => number, (i: number) => number];
   const gaussian = props.has('f_dc_0') && props.has('scale_0') && props.has('rot_0');
-  const done = begin(count);
+  begin(count);
   const cov = new Float64Array(6);
 
   if (gaussian) {
@@ -120,7 +118,6 @@ export function parsePly(buf: ArrayBuffer): void {
     const [r, g, b] = ['red', 'green', 'blue'].map((n) => (props.has(n) ? field(n) : () => 204)) as ((i: number) => number)[];
     for (let i = 0; i < count; i++) put(x(i), y(i), z(i), 0.0004, 0, 0, 0.0004, 0, 0.0004, r!(i) / 255, g!(i) / 255, b!(i) / 255, 1);
   }
-  done();
   // 3DGS training data (COLMAP) is right-down-forward; turn it into our right-up-back axes.
   flipScene();
 }
@@ -131,7 +128,7 @@ export function parsePly(buf: ArrayBuffer): void {
 export function parseSplat(buf: ArrayBuffer): void {
   const n = Math.floor(buf.byteLength / 32);
   const f = new Float32Array(buf, 0, n * 8), u = new Uint8Array(buf), cov = new Float64Array(6);
-  const done = begin(n);
+  begin(n);
   for (let i = 0; i < n; i++) {
     const r = i * 32 + 28, c = i * 32 + 24;
     covFromQuat((u[r]! - 128) / 128, (u[r + 1]! - 128) / 128, (u[r + 2]! - 128) / 128, (u[r + 3]! - 128) / 128,
@@ -139,7 +136,6 @@ export function parseSplat(buf: ArrayBuffer): void {
     put(f[i * 8]!, f[i * 8 + 1]!, f[i * 8 + 2]!, cov[0]!, cov[1]!, cov[2]!, cov[3]!, cov[4]!, cov[5]!,
       u[c]! / 255, u[c + 1]! / 255, u[c + 2]! / 255, u[c + 3]! / 255);
   }
-  done();
 }
 
 // ---- .spz (Niantic) -------------------------------------------------------------------------
@@ -193,7 +189,7 @@ export async function parseSpz(buf: ArrayBuffer): Promise<void> {
   });
   const [positions, alphas, colors, scales, rotations, shBytes] = parts as [Uint8Array, Uint8Array, Uint8Array, Uint8Array, Uint8Array, Uint8Array | undefined];
 
-  const done = begin(n);
+  begin(n);
   const degree = Math.min(3, fileDegree);
   allocateSh(n, degree);
   asset.aa = flags & 0x1 ? 'aa' : 'none';
@@ -246,7 +242,6 @@ export async function parseSpz(buf: ArrayBuffer): Promise<void> {
       }
     }
   }
-  done();
 }
 
 // ---- glTF 2.0 + KHR_gaussian_splatting --------------------------------------------------------
@@ -392,7 +387,7 @@ export function parseGltf(buf: ArrayBuffer): void {
     degree = l;
   }
 
-  const done = begin(total);
+  begin(total);
   allocateSh(total, degree);
   asset.linear = items[0]!.prim.extensions?.[KHR]?.colorSpace === 'lin_rec709_display';
   const cov = new Float64Array(6);
@@ -436,7 +431,6 @@ export function parseGltf(buf: ArrayBuffer): void {
     // Transpose of the rotation part, column-major.
     asset.shRot = new Float32Array([L[0]! / c0, L[3]! / c1, L[6]! / c2, L[1]! / c0, L[4]! / c1, L[7]! / c2, L[2]! / c0, L[5]! / c1, L[8]! / c2]);
   }
-  done();
 }
 
 // ---- Shared -------------------------------------------------------------------------------

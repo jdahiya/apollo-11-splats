@@ -17,13 +17,12 @@ export interface PowerProfile {
   /** Rough GPU cost model, used when the GPU timer is unavailable. */
   msPerMillionSplats: number;
   msPerMegapixel: number;
-  msPer100kRelit: number;
 }
 
 const PROFILES: Record<DeviceKind, PowerProfile> = {
-  phone: { kind: 'phone', label: 'Phone', batteryWh: 15, base: 0.9, gpuMax: 3.5, cpuMax: 2.5, msPerMillionSplats: 9, msPerMegapixel: 5, msPer100kRelit: 3 },
-  laptop: { kind: 'laptop', label: 'Laptop', batteryWh: 60, base: 6, gpuMax: 25, cpuMax: 18, msPerMillionSplats: 2, msPerMegapixel: 0.9, msPer100kRelit: 0.7 },
-  desktop: { kind: 'desktop', label: 'Desktop', batteryWh: 0, base: 30, gpuMax: 160, cpuMax: 60, msPerMillionSplats: 1, msPerMegapixel: 0.4, msPer100kRelit: 0.3 },
+  phone: { kind: 'phone', label: 'Phone', batteryWh: 15, base: 0.9, gpuMax: 3.5, cpuMax: 2.5, msPerMillionSplats: 9, msPerMegapixel: 5 },
+  laptop: { kind: 'laptop', label: 'Laptop', batteryWh: 60, base: 6, gpuMax: 25, cpuMax: 18, msPerMillionSplats: 2, msPerMegapixel: 0.9 },
+  desktop: { kind: 'desktop', label: 'Desktop', batteryWh: 0, base: 30, gpuMax: 160, cpuMax: 60, msPerMillionSplats: 1, msPerMegapixel: 0.4 },
 };
 
 interface BatteryManagerLike extends EventTarget {
@@ -74,9 +73,9 @@ export class PowerModel {
   }
 
   /** Modelled GPU milliseconds for one frame. */
-  estimateGpuMs(splats: number, pixels: number, relit: number): number {
+  estimateGpuMs(splats: number, pixels: number): number {
     const p = this.profile;
-    return (p.msPerMillionSplats * splats) / 1e6 + (p.msPerMegapixel * pixels) / 1e6 + (p.msPer100kRelit * relit) / 1e5;
+    return (p.msPerMillionSplats * splats) / 1e6 + (p.msPerMegapixel * pixels) / 1e6;
   }
 
   /** gpuBusy and cpuBusy are fractions of wall time (0..1). */

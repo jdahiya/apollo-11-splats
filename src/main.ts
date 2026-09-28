@@ -1,72 +1,66 @@
-// Entry point: builds the landing site, runs the frame loop and wires up the interface.
+// Entry point: loads the splat model of Tranquility Base trained from the Apollo 11 photographs,
+// runs the frame loop and wires up the interface.
 import { Camera } from './camera/camera';
 import { Controls } from './camera/controls';
-import { Flight, VIEWS, type ViewName } from './camera/stations';
+import { Flight, STATIONS, TOUR, type StationName } from './camera/stations';
 import { Governor, type Knobs } from './perf/governor';
 import { PerfPanel } from './perf/panel';
 import { PowerModel } from './perf/power';
 import { PerfStats } from './perf/stats';
 import { GpuTimer } from './perf/timer';
-import { Lighting } from './render/lighting';
 import { Renderer } from './render/renderer';
-import { buildVoxelGrids } from './render/voxels';
-import { buildScene } from './scene/build';
 import { Sorter } from './sort/sorter';
 import { flipScene, parseGltf, parsePly, parseSplat, parseSpz } from './splats/importers';
 import { asset, store, type AntiAliasing } from './splats/store';
 import { byId, nextPaint, toast } from './util/dom';
 import type { Vec3 } from './util/math';
-import { Landing, LightRig, TOUCHDOWN } from './world/landing';
-import { EVA_ELEVATION, sunAt, sunLabel } from './world/sun';
 
 const IS_PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820;
 const FONT = '"Saira Condensed", "Arial Narrow", sans-serif';
 
+/**
+ * The trained model, and how many of its splats (ordered by importance) each detail level draws.
+ * The light level also comes as a file of its own, so phones needn't download the rest.
+ */
+const SITE_URL = 'tranquility.spz';
+const SITE_MANIFEST = 'tranquility.json';
+interface Manifest {
+  splats: number;
+  levels: { light: number; standard: number; full: number };
+  lightFile?: string;
+}
+type Level = keyof Manifest['levels'];
+
 /** Starting points per device class; the governor adapts from here to hold 60 fps or more. */
 const PROFILE = IS_PHONE
-  ? {
-      knobs: { scale: 0.75, minScale: 0.5, maxScale: 1, dpr: 2, rtRows: 16, rtMin: 2, rtMax: 64, minPx: 0, bloom: true },
-      rays: { rays: 2, cacheRays: 2, lightSamples: 1, steps: 32 },
-      voxel: { fine: 0.8, coarse: 8 },
-      cycles: 8,
-      density: 0.5,
-    }
-  : {
-      knobs: { scale: 1, minScale: 0.5, maxScale: 1, dpr: 2, rtRows: 96, rtMin: 8, rtMax: 512, minPx: 0, bloom: true },
-      rays: { rays: 3, cacheRays: 3, lightSamples: 1, steps: 64 },
-      voxel: { fine: 0.4, coarse: 4 },
-      cycles: 12,
-      density: 1,
-    };
+  ? { knobs: { scale: 0.75, minScale: 0.5, maxScale: 1, dpr: 2, minPx: 0 }, level: 'light' as Level }
+  : { knobs: { scale: 1, minScale: 0.5, maxScale: 1, dpr: 2, minPx: 0 }, level: 'full' as Level };
 
 const canvas = byId<HTMLCanvasElement>('view');
 const renderer = createRenderer();
 const gl = renderer.gl;
-const lighting = new Lighting(gl, renderer.hdr);
 const camera = new Camera();
 const flight = new Flight();
-const landing = new Landing();
-const rig = new LightRig();
 const timer = new GpuTimer(gl);
 const power = new PowerModel(IS_PHONE);
 const governor = new Governor({ ...PROFILE.knobs } satisfies Knobs);
 const stats = new PerfStats(power);
 
-let sun = sunAt(EVA_ELEVATION);
-let density = PROFILE.density;
+let manifest: Manifest | null = null;
+let level: Level = PROFILE.level;
+/** Whether the whole model is loaded, or only the light level's file; and whether the rest is on its way. */
+let loadedFull = false;
+let loadingFull = false;
+/** A capture the visitor opened, instead of the site. */
 let custom = false;
-let rtEnabled = true;
-/** Tangential projection (RealityKit's default) for the site; captures use the perspective one they were trained with. */
-let tangential = true;
-let autoSpin = !IS_PHONE;
-/** Splat index layers of the scene on screen (see renderer.ts). */
-let layers: [number, number, number, number] = [0, 0, 0, 0];
-/** The camera follows the landing replay until the user takes over. */
-let followLanding = false;
-/** Lens zoom: the Earth station uses a longer lens. Eases toward zoomTo. */
-let zoom = 1;
-let zoomTo = 1;
-let announced = 0;
+/** Tangential projection (RealityKit's default) or the 3DGS perspective projection the site was trained with. */
+let tangential = false;
+/** Vertical field of view: photo stations use the Hasselblad's. Eases toward fovTo. */
+let fovTo = 0;
+let station: StationName | null = null;
+/** The tour: which stop it's on, and when to leave it (0 while flying there). */
+let tour: { stop: number; leaveAt: number } | null = null;
+const TOUR_PAUSE_MS = 5500;
 let running = false;
 let idleFrames = 0;
 let lastRaf = 0;
@@ -75,11 +69,8 @@ let forceRender = true;
 let sortArrived = false;
 /** The loading overlay stays up until the first sorted frame, so a new scene never flashes in half-drawn. */
 let awaitingSort = false;
-/** What's on screen eases toward the governor's settings rather than switching (no popping). */
-let bloomLevel = 1;
-let lightLevel = 0;
+/** The sub-pixel cutoff eases toward the governor's setting rather than switching (no popping). */
 let minPxLevel = 0;
-let frameSeed = 0;
 let idleSampler = 0;
 let sceneW = 1;
 let sceneH = 1;
@@ -115,12 +106,6 @@ const panel = new PerfPanel(
   power,
   timer,
   () => ({
-    lighting: !rtEnabled
-      ? 'Off'
-      : !lighting.ready
-        ? custom ? 'Off for captures (their lighting is baked in)' : 'Preparing'
-        : lighting.status,
-    rays: `${PROFILE.rays.rays} bounce + ${PROFILE.rays.lightSamples} shadow per splat, ${PROFILE.rays.cacheRays} bounce per voxel`,
     drawn: renderer.drawCount,
     sceneW,
     sceneH,
@@ -143,19 +128,7 @@ const panel = new PerfPanel(
     },
     adaptive: (on) => {
       governor.adaptive = on;
-      if (!on) Object.assign(governor.knobs, PROFILE.knobs, { bloom: governor.bloomWanted });
-      forceRender = true;
-      wake();
-    },
-    lighting: (on) => {
-      rtEnabled = on;
-      if (on) lighting.kick('all', PROFILE.cycles);
-      forceRender = true;
-      wake();
-    },
-    bloom: (on) => {
-      governor.bloomWanted = on;
-      governor.knobs.bloom = on;
+      if (!on) Object.assign(governor.knobs, PROFILE.knobs);
       forceRender = true;
       wake();
     },
@@ -192,6 +165,11 @@ function sample(now: number): void {
   panel.update();
 }
 
+/** The field of view away from photo stations: wider on portrait screens. */
+function baseFov(): number {
+  return canvas.clientWidth < canvas.clientHeight ? (72 * Math.PI) / 180 : Math.PI / 3;
+}
+
 function resizeCanvas(): void {
   const dpr = Math.min(window.devicePixelRatio || 1, governor.knobs.dpr);
   const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
@@ -200,7 +178,6 @@ function resizeCanvas(): void {
     canvas.height = h;
     forceRender = true;
   }
-  camera.fov = (canvas.clientWidth < canvas.clientHeight ? (72 * Math.PI) / 180 : Math.PI / 3) / zoom;
 }
 
 function frame(now: number): void {
@@ -210,36 +187,26 @@ function frame(now: number): void {
   lastRaf = now;
   const cpuStart = performance.now();
 
-  const zooming = Math.abs(zoomTo - zoom) > 0.001;
-  zoom = zooming ? zoom + (zoomTo - zoom) * (1 - Math.exp(-dt * 3)) : zoomTo;
   resizeCanvas();
+  const wantFov = fovTo || baseFov();
+  const zooming = Math.abs(wantFov - camera.fov) > 1e-4;
+  camera.fov = zooming ? camera.fov + (wantFov - camera.fov) * (1 - Math.exp(-dt * 4)) : wantFov;
   const flying = flight.update(camera, now);
-  if (flying === 'ended') {
-    setTour(false);
-    setStation('earth');
+  if (tour && !flying) {
+    // Arrived: pause on the photo, then fly on (or stop after the last one).
+    if (!tour.leaveAt) {
+      tour.leaveAt = now + TOUR_PAUSE_MS;
+      window.setTimeout(wake, TOUR_PAUSE_MS + 20);
+    } else if (now >= tour.leaveAt) {
+      if (++tour.stop < TOUR.length) {
+        tour.leaveAt = 0;
+        goTo(TOUR[tour.stop]!);
+      } else {
+        setTour(false);
+      }
+    }
   }
-  if (flying === 'idle' && autoSpin) camera.yaw += dt * 0.04;
   const keyMoved = controls.update(dt);
-
-  // The landing replay: Eagle's pose, dust and engine, and the chase camera.
-  const replaying = landing.active;
-  const lf = landing.frame(now);
-  if (replaying) {
-    if (followLanding && landing.active) camera.setEyeLook(...landing.camera(now));
-    const t = landing.time(now);
-    if (announced === 0 && t >= TOUCHDOWN) {
-      announced = 1;
-      toast('“Houston, Tranquility Base here. The Eagle has landed.”', 4200);
-    } else if (announced === 1 && t >= TOUCHDOWN + 3.2) {
-      announced = 2;
-      toast('Six and a half hours later: the moonwalk', 3000);
-    }
-    if (!landing.active) {
-      byId('land').textContent = 'Landing';
-      followLanding = false;
-    }
-  }
-  sorter.setRigid(landing.active ? { start: layers[2], end: layers[3], m: Array.from(lf.eagle) } : null);
 
   const k = governor.knobs;
   sceneW = Math.max(1, Math.round(canvas.width * k.scale));
@@ -248,20 +215,16 @@ function frame(now: number): void {
   sorter.request(v.depthRow, v.eye);
 
   const key = [v.eye[0], v.eye[1], v.eye[2], v.fwd[0], v.fwd[1], v.fwd[2], sceneW, sceneH];
-  let moved = false;
-  for (let i = 0; i < 8 && !moved; i++) moved = !(Math.abs(key[i]! - lastView[i]!) < 1e-6);
-  const relighting = rtEnabled && lighting.active;
-  // Bloom, the ray-traced lighting and the sub-pixel cutoff fade over about a quarter of a second.
-  const ease = 1 - Math.exp(-dt * 8);
-  const bloomTo = k.bloom ? 1 : 0, lightTo = rtEnabled && lighting.ready ? 1 : 0;
-  bloomLevel += (bloomTo - bloomLevel) * ease;
-  lightLevel += (lightTo - lightLevel) * ease;
-  minPxLevel += (k.minPx - minPxLevel) * ease;
-  if (Math.abs(bloomTo - bloomLevel) < 0.002) bloomLevel = bloomTo;
-  if (Math.abs(lightTo - lightLevel) < 0.002) lightLevel = lightTo;
+  let moved = false, camMoved = false;
+  for (let i = 0; i < 8 && !moved; i++) {
+    moved = !(Math.abs(key[i]! - lastView[i]!) < 1e-6);
+    camMoved = moved && i < 6;
+  }
+  // The sub-pixel cutoff fades over about a quarter of a second.
+  minPxLevel += (k.minPx - minPxLevel) * (1 - Math.exp(-dt * 8));
   if (Math.abs(k.minPx - minPxLevel) < 0.01) minPxLevel = k.minPx;
-  const fading = bloomLevel !== bloomTo || lightLevel !== lightTo || minPxLevel !== k.minPx;
-  const busy = forceRender || moved || sortArrived || relighting || fading || replaying || zooming || flying === 'moving' || autoSpin || keyMoved;
+  const fading = minPxLevel !== k.minPx;
+  const busy = forceRender || moved || sortArrived || fading || zooming || flying || keyMoved;
   if (!busy) {
     sample(now);
     if (++idleFrames > 45) sleep();
@@ -269,41 +232,16 @@ function frame(now: number): void {
     return;
   }
   idleFrames = 0;
+  // The photo only lines up from the station itself.
+  if (camMoved && !flying) hidePhoto();
   if (!governor.shouldRender(now, lastRender)) {
     requestAnimationFrame(frame);
     return;
   }
 
   timer.begin();
-  let relit = 0;
-  if (relighting) {
-    relit = lighting.step(
-      renderer.dataTex,
-      {
-        rows: k.rtRows,
-        cacheSlices: Math.max(2, Math.round(k.rtRows / 6)),
-        rays: PROFILE.rays.rays,
-        cacheRays: PROFILE.rays.cacheRays,
-        lightSamples: PROFILE.rays.lightSamples,
-        steps: PROFILE.rays.steps,
-      },
-      sun,
-      rig,
-      0.08,
-      0.08,
-    );
-  }
-  frameSeed = (frameSeed + 1) % 997;
   renderer.render(
-    {
-      view: v.view, proj: v.proj, focal: v.focal, right: v.right, up: v.up, fwd: v.fwd, eye: v.eye, tanHalf: v.tanHalf, aspect: v.aspect,
-      look: !custom,
-      sun: sun.dir,
-      fogColor: [0, 0, 0], fogDensity: 0,
-      lightTex: lighting.ready && lightLevel > 0 ? lighting.tex : null, lightMix: lightLevel, lightLayout: lighting.lightLayout,
-      minPx: minPxLevel, bloom: bloomLevel, seed: frameSeed, tangential,
-      layers, eagle: lf.eagle, eagleInv: lf.eagleInv, evaVis: lf.eva, dust: lf.dust, engine: lf.engine, time: now / 1000,
-    },
+    { view: v.view, proj: v.proj, focal: v.focal, eye: v.eye, tanHalf: v.tanHalf, aspect: v.aspect, minPx: minPxLevel, tangential },
     sceneW, sceneH, canvas.width, canvas.height,
   );
   timer.end();
@@ -316,9 +254,9 @@ function frame(now: number): void {
   const gap = now - lastRender;
   const interval = lastRender && gap < 70 ? gap : NaN;
   lastRender = now;
-  stats.frameRendered(interval, performance.now() - cpuStart, power.estimateGpuMs(renderer.drawCount, sceneW * sceneH, relit));
+  stats.frameRendered(interval, performance.now() - cpuStart, power.estimateGpuMs(renderer.drawCount, sceneW * sceneH));
   if (Number.isFinite(interval)) governor.record(interval);
-  governor.evaluate(now, relighting);
+  governor.evaluate(now);
   sample(now);
   for (let i = 0; i < 8; i++) lastView[i] = key[i]!;
   forceRender = false;
@@ -348,28 +286,69 @@ function showLoading(title: string, message: string): void {
   byId('loading').hidden = false;
 }
 
-async function buildSite(): Promise<void> {
-  showLoading('Placing splats', 'Building Tranquility Base…');
+/** Downloads a file, showing progress in the loading overlay. */
+async function download(url: string, what: string): Promise<ArrayBuffer> {
+  const res = await fetch(url);
+  if (!res.ok || !res.body) throw new Error(`${what}: ${res.status} ${res.statusText}`);
+  const total = Number(res.headers.get('content-length')) || 0;
+  const reader = res.body.getReader(), parts: Uint8Array[] = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.length;
+    // (A server may report the compressed size; then just count up.)
+    byId('loading-msg').textContent = total >= got
+      ? `${what} · ${(got / 1048576).toFixed(0)} of ${(total / 1048576).toFixed(0)} MB`
+      : `${what} · ${(got / 1048576).toFixed(0)} MB`;
+  }
+  const out = new Uint8Array(got);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out.buffer;
+}
+
+/** Hands the first `count` splats to the GPU and the sort. */
+function showSplats(count: number): void {
+  renderer.upload(store, count);
+  sorter.load(store.pos.slice(0, count * 3), count);
+  byId('st-n').textContent = count.toLocaleString('en-CA');
+}
+
+/** Downloads and unpacks the model: the whole of it, or just the light level's own file. */
+async function fetchModel(full: boolean): Promise<void> {
+  const whole = full || !manifest!.lightFile;
+  const buf = await download(whole ? SITE_URL : manifest!.lightFile!, 'Splat model');
+  byId('loading-msg').textContent = 'Unpacking splats…';
+  await nextPaint();
+  await parseSpz(buf);
+  loadedFull = whole;
+}
+
+async function loadSite(): Promise<void> {
+  showLoading('Loading Tranquility Base', 'Trained from the Apollo 11 photographs…');
   await nextPaint();
   const t0 = performance.now();
-  const scene = buildScene(density);
+  try {
+    manifest = (await (await fetch(SITE_MANIFEST)).json()) as Manifest;
+    await fetchModel(level !== 'light');
+  } catch (err) {
+    showLoading('Could not load the model', err instanceof Error ? err.message : String(err));
+    return;
+  }
   custom = false;
   setCustomUi(false);
-  layers = scene.layers;
-  renderer.upload(store);
-  lighting.reset(store.count, 0);
-  lighting.setLayers(scene.layers, scene.eagleBox);
-  byId('loading-msg').textContent = 'Voxelising the site for ray tracing…';
-  await nextPaint();
-  const grids = buildVoxelGrids(store, scene.layers[3], scene.solids, PROFILE.voxel.fine, PROFILE.voxel.coarse, gl.getParameter(gl.MAX_3D_TEXTURE_SIZE) as number);
-  lighting.setGrids(grids.fine, grids.coarse);
-  lighting.kick('all', PROFILE.cycles, true);
-  sorter.load(store.pos.slice(0, store.count * 3), store.count);
-  byId('st-n').textContent = store.count.toLocaleString('en-CA');
+  setProjection(false);
+  showSplats(manifest.levels[level]);
+  syncLevel();
   awaitFirstSort();
   forceRender = true;
   wake();
-  toast(`${store.count.toLocaleString('en-CA')} splats in ${((performance.now() - t0) / 1000).toFixed(1)} s. Lighting refines over the next few seconds.`, 4200);
+  toast(`${manifest.levels[level].toLocaleString('en-CA')} splats in ${((performance.now() - t0) / 1000).toFixed(1)} s`, 3000);
 }
 
 const CAPTURE_TYPES = ['.ply', '.splat', '.spz', '.glb', '.gltf'];
@@ -393,18 +372,15 @@ async function loadCapture(file: File): Promise<void> {
     custom = true;
     setCustomUi(true);
     setProjection(false);
-    layers = [0, store.count, store.count, store.count];
-    renderer.upload(store);
-    lighting.reset(store.count, 0);
-    sorter.load(store.pos.slice(0, store.count * 3), store.count);
+    showSplats(store.count);
     frameCapture();
-    byId('st-n').textContent = store.count.toLocaleString('en-CA');
     byId<HTMLSelectElement>('aa-mode').value = asset.aa;
     const colour = asset.shDegree ? `, view-dependent colour (degree ${asset.shDegree})` : '';
     toast(`${store.count.toLocaleString('en-CA')} splats loaded${colour}. Use Flip if it looks upside down.`, 5000);
   } catch (err) {
     toast(err instanceof Error ? err.message : 'That file could not be read.', 5000);
-    await buildSite();
+    await loadSite();
+    return;
   }
   awaitFirstSort();
   forceRender = true;
@@ -432,18 +408,54 @@ function frameCapture(): void {
 // ---- Interface --------------------------------------------------------------------------
 
 function userTookOver(): void {
-  autoSpin = false;
-  followLanding = false;
-  if (flight.touring) setTour(false);
+  if (tour) setTour(false);
   flight.stop();
   setStation(null);
+  fovTo = 0;
+  hidePhoto();
 }
 
-function setStation(name: ViewName | null): void {
+function setStation(name: StationName | null): void {
+  station = name;
   document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === name)));
+  const photo = name ? STATIONS[name].photo : undefined;
+  const compare = byId<HTMLButtonElement>('compare');
+  compare.hidden = !photo;
+  compare.setAttribute('aria-pressed', 'false');
+  byId('caption').textContent = name ? STATIONS[name].caption : '';
+  byId('caption').hidden = !name;
+}
+
+/** Flies to a station; photo stations also take on the Hasselblad's field of view. */
+function goTo(name: StationName): void {
+  hidePhoto();
+  flight.goTo(camera, name, performance.now());
+  const fov = STATIONS[name].fov;
+  fovTo = fov ? (fov * Math.PI) / 180 : 0;
+  setStation(name);
+  wake();
+}
+
+/** The original photograph over the view, turned to the camera's roll so the two line up. */
+function showPhoto(): void {
+  const photo = station ? STATIONS[station].photo : undefined;
+  if (!photo) return;
+  const fig = byId('photo'), img = byId<HTMLImageElement>('photo-img');
+  img.src = `photos/${photo.id}.jpg`;
+  img.alt = `NASA photograph ${photo.id}`;
+  img.style.transform = `rotate(${photo.roll}deg)`;
+  byId('photo-id').textContent = `${photo.id} · NASA`;
+  fig.hidden = false;
+  byId('compare').setAttribute('aria-pressed', 'true');
+}
+
+function hidePhoto(): void {
+  byId('photo').hidden = true;
+  byId('compare').setAttribute('aria-pressed', 'false');
 }
 
 function setTour(on: boolean): void {
+  tour = on ? { stop: 0, leaveAt: 0 } : null;
   const b = byId('tour');
   b.setAttribute('aria-pressed', String(on));
   b.textContent = on ? 'Stop tour' : 'Play tour';
@@ -451,10 +463,15 @@ function setTour(on: boolean): void {
 
 function setCustomUi(on: boolean): void {
   byId('stations').hidden = on;
+  byId('levels').hidden = on;
   byId('flip').hidden = !on;
   byId('back').hidden = !on;
   byId('aa-mode').hidden = !on;
-  byId('subtitle').textContent = on ? 'Your capture' : 'Gaussian splats · Tranquility Base';
+  byId('subtitle').textContent = on ? 'Your capture' : 'Gaussian splats · trained from the mission photographs';
+  if (on) {
+    setStation(null);
+    fovTo = 0;
+  }
 }
 
 function setProjection(on: boolean): void {
@@ -462,74 +479,58 @@ function setProjection(on: boolean): void {
   byId<HTMLSelectElement>('pf-proj').value = on ? 'tangential' : 'perspective';
 }
 
-function syncDensity(): void {
-  document.querySelectorAll<HTMLButtonElement>('[data-q]').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.q) === density)));
-}
-
-const sunInput = byId<HTMLInputElement>('sun');
-
-function updateSun(): void {
-  const label = sunLabel(sun.elevation);
-  byId('sun-out').textContent = label;
-  sunInput.setAttribute('aria-valuetext', `Sun ${label} above the horizon`);
+function syncLevel(): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.level === level)));
 }
 
 document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) =>
   b.addEventListener('click', () => {
-    const name = b.dataset.view as ViewName;
-    autoSpin = name === 'overview' && !IS_PHONE;
-    zoomTo = name === 'earth' ? 1.6 : 1;
-    followLanding = false;
     setTour(false);
-    flight.goTo(camera, name, performance.now());
-    setStation(name);
-    wake();
+    goTo(b.dataset.view as StationName);
   }),
 );
 
 byId('tour').addEventListener('click', () => {
-  if (flight.touring) {
+  if (tour) {
     flight.stop();
     setTour(false);
   } else {
-    autoSpin = false;
-    followLanding = false;
-    flight.startTour(performance.now());
-    zoomTo = 1;
     setTour(true);
-    setStation(null);
+    goTo(TOUR[0]!);
   }
   wake();
 });
 
-byId('land').addEventListener('click', () => {
-  if (custom) return;
-  autoSpin = false;
-  flight.stop();
-  setTour(false);
-  setStation(null);
-  landing.trigger(performance.now());
-  followLanding = true;
-  zoomTo = 1;
-  announced = 0;
-  byId('land').textContent = 'Replaying…';
-  toast('Eagle, 150 m up and 460 m east of the landing site', 3000);
-  wake();
+byId('compare').addEventListener('click', () => {
+  if (byId('photo').hidden) showPhoto();
+  else hidePhoto();
 });
 
-sunInput.addEventListener('input', () => {
-  sun = sunAt(Number(sunInput.value));
-  updateSun();
-  lighting.kick('all', PROFILE.cycles);
-  forceRender = true;
-  wake();
-});
-
-document.querySelectorAll<HTMLButtonElement>('[data-q]').forEach((b) =>
-  b.addEventListener('click', () => {
-    density = Number(b.dataset.q);
-    syncDensity();
-    void buildSite();
+document.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((b) =>
+  b.addEventListener('click', async () => {
+    if (!manifest || custom) return;
+    level = b.dataset.level as Level;
+    syncLevel();
+    if (level !== 'light' && !loadedFull) {
+      // A load already under way will show whichever level is chosen when it finishes.
+      if (loadingFull) return;
+      loadingFull = true;
+      showLoading('Loading more detail', 'The rest of the splats…');
+      await nextPaint();
+      try {
+        await fetchModel(true);
+      } catch (err) {
+        byId('loading').hidden = true;
+        toast(err instanceof Error ? err.message : String(err), 5000);
+        return;
+      } finally {
+        loadingFull = false;
+      }
+      awaitFirstSort();
+    }
+    showSplats(manifest.levels[level]);
+    forceRender = true;
+    wake();
   }),
 );
 
@@ -547,19 +548,13 @@ byId<HTMLSelectElement>('aa-mode').addEventListener('change', (e) => {
 
 byId('flip').addEventListener('click', () => {
   flipScene();
-  renderer.upload(store);
-  sorter.load(store.pos.slice(0, store.count * 3), store.count);
+  showSplats(store.count);
   forceRender = true;
   wake();
 });
 
 byId('back').addEventListener('click', () => {
-  setProjection(true);
-  void buildSite().then(() => {
-    flight.goTo(camera, 'overview', performance.now());
-    setStation('overview');
-    wake();
-  });
+  void loadSite().then(() => goTo('ladder'));
 });
 
 let dragDepth = 0;
@@ -601,26 +596,22 @@ function vec3Param(value: string | null): Vec3 | null {
 }
 
 async function start(): Promise<void> {
-  if (IS_PHONE) byId('q-ultra').hidden = true;
-  syncDensity();
-  // ?eye=x,y,z&look=x,y,z opens at a particular viewpoint and ?sun=degrees sets the sun's height,
-  // so a view can be shared as a link.
+  // ?eye=x,y,z&look=x,y,z opens at a particular viewpoint and ?station=name at a station, so a
+  // view can be shared as a link.
   const params = new URLSearchParams(location.search);
   const eye = vec3Param(params.get('eye')), look = vec3Param(params.get('look'));
+  const named = params.get('station');
+  const first: StationName = named && named in STATIONS ? (named as StationName) : 'ladder';
   if (eye && look) {
     camera.setEyeLook(eye, look);
     setStation(null);
-    autoSpin = false;
   } else {
-    camera.setEyeLook(...VIEWS.overview);
-    setStation('overview');
+    camera.setEyeLook(STATIONS[first].eye, STATIONS[first].look);
+    const fov = STATIONS[first].fov;
+    fovTo = fov ? (fov * Math.PI) / 180 : 0;
+    camera.fov = fovTo || baseFov();
+    setStation(first);
   }
-  const elevation = Number(params.get('sun'));
-  if (params.has('sun') && Number.isFinite(elevation)) {
-    sunInput.value = String(elevation);
-    sun = sunAt(Number(sunInput.value));
-  }
-  updateSun();
   void power.connectBattery();
   wake();
   try {
@@ -636,12 +627,13 @@ async function start(): Promise<void> {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       await loadCapture(new File([await res.blob()], url.pathname.split('/').pop() || 'capture'));
+      if (eye && look) camera.setEyeLook(eye, look);
       return;
     } catch (err) {
       toast(`Couldn't open that capture link: ${err instanceof Error ? err.message : String(err)}`, 5000);
     }
   }
-  await buildSite();
+  await loadSite();
 }
 
 void start();

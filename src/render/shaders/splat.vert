@@ -5,19 +5,13 @@ precision highp usampler2D;
 
 // Splat data: two RGBA32UI texels per splat, 1024 splats per row.
 //   texel 0: position xyz (float bits), colour RGBA8 (the degree-0 colour, 0.5 + C0 · f_dc)
-//   texel 1: covariance as three half2 pairs, then gain (half) | octahedral normal << 16
+//   texel 1: covariance as three half2 pairs
 // Rendering follows Kerbl et al. 2023 (3D Gaussian Splatting) and KHR_gaussian_splatting:
-// EWA projection with a 0.3 px dilation, alpha = min(0.99, o·G), skip alpha < 1/255, 3σ extent.
-// The tangential projection from OpenUSD's 3D Gaussian splat schema (RealityKit's default) is
-// available too; see below.
-//
-// The scene comes in layers, by splat index (u_layers): the ground; other fixed things; what the
-// astronauts set out on the moonwalk (faded out while the landing replays); Eagle, which moves as
-// one rigid body during the landing; and the dust its engine blows out, animated here.
+// EWA projection with a 0.3 px dilation, alpha = min(0.99, o·G), skip alpha < 1/255, 3σ extent,
+// and view-dependent colour from spherical harmonics up to degree 3. The tangential projection
+// from OpenUSD's 3D Gaussian splat schema (RealityKit's default) is available too; see below.
 uniform usampler2D u_tex;
 uniform usampler2D u_sh;     // higher-order spherical harmonics, 512 splats per row
-uniform sampler2D u_light;   // ray-traced lighting per splat, RGB = light / 2
-uniform ivec4 u_lightLayout; // its interleaved layout: interior count, total, interior rows, exterior rows
 uniform mat4 u_proj;
 uniform mat4 u_view;
 uniform vec2 u_focal;
@@ -28,22 +22,8 @@ uniform mat3 u_shRot;        // world directions into the capture's own axes
 uniform int u_shDegree;
 uniform int u_shTexels;
 uniform int u_aa;            // 0 none, 1 anti-aliased (0.3 dilation), 2 Mip-Splatting (0.1 dilation)
-uniform float u_useLight;
-uniform float u_lightMix;    // 0..1: fades the ray-traced lighting in and out
 uniform float u_minPx;       // splats smaller than this many pixels fade out (none below half of it)
-uniform float u_fogD;
-uniform ivec4 u_layers;      // ground end, moonwalk start, Eagle start, Eagle end (dust after)
-uniform mat4 u_eagle;        // Eagle's rigid transform (identity once landed) and its inverse
-uniform mat4 u_eagleInv;
-uniform float u_evaVis;      // 0..1: the moonwalk's things
-uniform float u_dust;        // 0..1: descent-engine dust
-uniform float u_engine;      // 0..1: the engine's glow
-uniform float u_time;        // seconds, animates the dust
-uniform vec3 u_fogC;
-uniform float u_reflect;     // 1 to show sky reflections on glass and metal
-uniform int u_projection;     // 0 perspective (3DGS reference, glTF), 1 tangential (OpenUSD, RealityKit)
-
-#include "sky.glsl"
+uniform int u_projection;    // 0 perspective (3DGS reference, glTF), 1 tangential (OpenUSD, RealityKit)
 
 in vec2 a_pos;               // quad corner in [-1, 1]
 in uint a_idx;               // splat index, sorted far to near
@@ -66,56 +46,6 @@ const float SH_C3_3 = 0.3731763325901154;
 const float SH_C3_4 = -0.4570457994644658;
 const float SH_C3_5 = 1.445305721320277;
 const float SH_C3_6 = -0.5900435899266435;
-
-float hash1(uint x) {
-  x ^= x >> 16; x *= 0x7feb352du;
-  x ^= x >> 15; x *= 0x846ca68bu;
-  x ^= x >> 16;
-  return float(x) * (1.0 / 4294967296.0);
-}
-
-// Eagle's shadow on everything else is traced live against a simple stand-in for its shape, in
-// Eagle's own rest frame, so it follows Eagle during the landing. (The baked lighting leaves
-// Eagle out for them.) The ladder faces -x.
-float sdBox(vec3 p, vec3 c, vec3 b) {
-  vec3 q = abs(p - c) - b;
-  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-}
-
-float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
-  vec3 pa = p - a, ba = b - a;
-  return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)) - r;
-}
-
-float eagleSdf(vec3 p) {
-  float d = sdBox(p, vec3(0.0, 1.9, 0.0), vec3(1.95, 0.8, 1.95)) - 0.15;   // descent stage
-  d = min(d, sdBox(p, vec3(0.45, 4.25, 0.0), vec3(1.55, 1.4, 1.55)) - 0.15);  // ascent stage
-  d = min(d, sdCapsule(p, vec3(2.0, 2.4, 0.0), vec3(4.5, 0.3, 0.0), 0.12));    // legs
-  d = min(d, sdCapsule(p, vec3(-2.0, 2.4, 0.0), vec3(-4.5, 0.3, 0.0), 0.12));
-  d = min(d, sdCapsule(p, vec3(0.0, 2.4, 2.0), vec3(0.0, 0.3, 4.5), 0.12));
-  d = min(d, sdCapsule(p, vec3(0.0, 2.4, -2.0), vec3(0.0, 0.3, -4.5), 0.12));
-  return d;
-}
-
-/** 1 in sunlight, 0 in Eagle's shadow, soft at the edges. */
-float eagleShadow(vec3 p) {
-  vec3 q = (u_eagleInv * vec4(p, 1.0)).xyz, s = normalize(mat3(u_eagleInv) * u_sun);
-  if (s.y <= 0.0) return 1.0;
-  // Quick outs: toward the sun from Eagle, or off to the side of its shadow, or beyond its end.
-  vec2 dir = normalize(s.xz), rel = q.xz;
-  float along = dot(rel, dir), across = abs(rel.x * dir.y - rel.y * dir.x);
-  if (along > 5.0 || across > 5.5 || -along > 5.0 + 7.5 * length(s.xz) / s.y) return 1.0;
-  float res = 1.0, t = 0.05;
-  for (int i = 0; i < 48; i++) {
-    vec3 x = q + s * t;
-    if (x.y > 7.6) break;
-    float d = eagleSdf(x);
-    res = min(res, 12.0 * d / t);
-    if (res < 0.01) return 0.0;
-    t += clamp(d, 0.03, 1.2);
-  }
-  return smoothstep(0.0, 1.0, res);
-}
 
 #define SH(k) vec3(h[3 * (k)], h[3 * (k) + 1], h[3 * (k) + 2])
 
@@ -147,21 +77,7 @@ vec3 shColor(uint idx, vec3 worldPos) {
   return c;
 }
 
-vec3 octDecode(uint nc) {
-  vec2 e = (vec2(float(nc & 255u), float(nc >> 8)) - 1.0) / 254.0 * 2.0 - 1.0;
-  vec3 m = vec3(e, 1.0 - abs(e.x) - abs(e.y));
-  if (m.z < 0.0) m.xy = (1.0 - abs(m.yx)) * sign(m.xy);
-  return normalize(m);
-}
-
 void cull() { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); }
-
-/** Where splat i's light is: band splat j at column j / rows, row j % rows (see lighting.ts). */
-ivec2 lightTexel(int i) {
-  if (i < u_lightLayout.x) return ivec2(i / u_lightLayout.z, i % u_lightLayout.z);
-  int j = i - u_lightLayout.x;
-  return ivec2(j / u_lightLayout.w, u_lightLayout.z + j % u_lightLayout.w);
-}
 
 void main() {
   ivec2 tc = ivec2(int((a_idx & 1023u) << 1), int(a_idx >> 10));
@@ -172,35 +88,6 @@ void main() {
   uvec4 h = texelFetch(u_tex, tc + ivec2(1, 0), 0);
   vec2 u1 = unpackHalf2x16(h.x), u2 = unpackHalf2x16(h.y), u3 = unpackHalf2x16(h.z);
   mat3 V = mat3(u1.x, u1.y, u2.x, u1.y, u2.y, u3.x, u2.x, u3.x, u3.y);
-  uint nc = h.w >> 16;
-  vec3 nrm = nc != 0u ? octDecode(nc) : vec3(0.0, 1.0, 0.0);
-  float gain = unpackHalf2x16(h.w).x;
-
-  int idx = int(a_idx);
-  bool ground = idx < u_layers.x, eva = idx >= u_layers.y && idx < u_layers.z;
-  bool eagle = idx >= u_layers.z && idx < u_layers.w, dust = idx >= u_layers.w;
-  if (eagle) {
-    // Eagle moves as one rigid body during the landing.
-    mat3 R = mat3(u_eagle);
-    wp = (u_eagle * vec4(wp, 1.0)).xyz;
-    V = R * V * transpose(R);
-    nrm = R * nrm;
-    // Splats with gain 5 are the engine's glow.
-    if (gain > 4.5 && gain < 5.5) opacity *= u_engine;
-  } else if (dust) {
-    // A low sheet of dust streaking out radially from under Eagle, each splat looping outward
-    // and thinning as it goes.
-    uint s = a_idx * 2654435761u;
-    float ang = hash1(s) * 6.2831853, speed = 0.55 + hash1(s + 1u), life = fract(u_time * 0.85 * speed + hash1(s + 2u));
-    vec3 out3 = vec3(cos(ang), 0.0, sin(ang)), side = vec3(-out3.z, 0.0, out3.x);
-    float r = 1.2 + life * 30.0;
-    wp = vec3(u_eagle[3].x, 0.06 + 0.45 * life * hash1(s + 3u), u_eagle[3].z) + out3 * r;
-    float L = 0.5 + 1.6 * life, Wd = 0.18 + 0.3 * life, Ht = 0.04 + 0.08 * life;
-    V = L * L * outerProduct(out3, out3) + Wd * Wd * outerProduct(side, side) + Ht * Ht * mat3(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0);
-    opacity *= u_dust * (1.0 - life) * smoothstep(0.0, 0.08, life);
-  }
-  if (eva) opacity *= u_evaVis;
-  if (opacity < 1.0 / 255.0) { cull(); return; }
 
   vec4 cam = u_view * vec4(wp, 1.0);
   vec4 clip = u_proj * cam;
@@ -265,43 +152,8 @@ void main() {
   vec2 major = min(extent, cap) * e1;
   vec2 minor = min(sqrt(2.0 * l2), cap) * vec2(e1.y, -e1.x);
 
-  vec3 base = vec3(c.w & 0xffu, (c.w >> 8) & 0xffu, (c.w >> 16) & 0xffu) / 255.0;
-  if (u_shDegree > 0) base = max(base + shColor(a_idx, wp), 0.0);
-  vec3 col = base;
-  vec3 light = vec3(1.0);
-  if (gain > 1.01) {
-    col *= gain; // self-lit: the Earth, the engine's glow
-  } else if (u_useLight > 0.5) {
-    light = mix(vec3(1.0), texelFetch(u_light, lightTexel(idx), 0).rgb * 2.0, u_lightMix);
-    // In Eagle's shadow only light thrown back off the ground is left.
-    if (!eagle && !dust) light *= mix(0.14, 1.0, eagleShadow(wp));
-    col *= light;
-  }
-  if (ground) {
-    // Lunar soil throws light back toward the sun: brightest looking straight down-sun (the
-    // opposition surge round your own shadow), darker looking into the sun.
-    float g = acos(clamp(dot(normalize(u_camPos - wp), u_sun), -1.0, 1.0));
-    col *= 1.0 + 0.45 * exp(-g / 0.25) + 0.3 * cos(g);
-  }
-  // Glass and metal (negative gain): reflect the sky along the mirrored view direction, weighted
-  // by Fresnel, so glints move as the camera does. -gain in (0, 1] is glass with that base
-  // reflectance; in (1, 2] it's metal with reflectance -gain - 1, tinted by its own colour.
-  if (gain < -0.001 && nc != 0u && u_reflect > 0.5) {
-    float kind = -gain;
-    bool metal = kind > 1.0;
-    float f0 = metal ? kind - 1.0 : kind;
-    vec3 n = nrm;
-    vec3 v = normalize(wp - u_camPos);
-    if (dot(n, v) > 0.0) n = -n;
-    float cosT = clamp(-dot(v, n), 0.0, 1.0);
-    float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosT, 5.0);
-    vec3 env = skyRadiance(reflect(v, n), false);
-    // Surfaces in shadow don't catch the sun's glint.
-    float lit = clamp(dot(light, vec3(0.3333)) - 0.25, 0.0, 1.0);
-    env = min(env, mix(vec3(1.2), env, lit));
-    col = mix(col, env * (metal ? base : vec3(1.0)), fresnel);
-  }
-  col = mix(col, u_fogC, 1.0 - exp(-length(cam.xyz) * u_fogD));
+  vec3 col = vec3(c.w & 0xffu, (c.w >> 8) & 0xffu, (c.w >> 16) & 0xffu) / 255.0;
+  if (u_shDegree > 0) col = max(col + shColor(a_idx, wp), 0.0);
 
   // Only cover pixels where alpha can reach 1/255: |p|² ≤ ln(255·opacity), and never beyond 3σ.
   float reach = min(SQRT_4_5, sqrt(max(log(255.0 * opacity), 0.0)));

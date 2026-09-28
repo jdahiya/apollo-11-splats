@@ -73,6 +73,8 @@ let lastRaf = 0;
 let lastRender = 0;
 let forceRender = true;
 let sortArrived = false;
+/** The loading overlay stays up until the first sorted frame, so a new scene never flashes in half-drawn. */
+let awaitingSort = false;
 /** What's on screen eases toward the governor's settings rather than switching (no popping). */
 let bloomLevel = 1;
 let lightLevel = 0;
@@ -97,6 +99,7 @@ const sorter = new Sorter(
     renderer.setOrder(order);
     stats.sortResult(ms);
     sortArrived = true;
+    if (awaitingSort) revealScene();
     wake();
   },
   () => {
@@ -325,6 +328,20 @@ function frame(now: number): void {
 
 // ---- Scenes ---------------------------------------------------------------------------
 
+/** Takes the loading overlay down once the new scene can be drawn in order. */
+function revealScene(): void {
+  awaitingSort = false;
+  byId('loading').hidden = true;
+}
+
+/** Holds the overlay until the first sorted frame (or three seconds at most). */
+function awaitFirstSort(): void {
+  awaitingSort = true;
+  window.setTimeout(() => {
+    if (awaitingSort) revealScene();
+  }, 3000);
+}
+
 function showLoading(title: string, message: string): void {
   byId('loading-title').textContent = title;
   byId('loading-msg').textContent = message;
@@ -349,7 +366,7 @@ async function buildSite(): Promise<void> {
   lighting.kick('all', PROFILE.cycles, true);
   sorter.load(store.pos.slice(0, store.count * 3), store.count);
   byId('st-n').textContent = store.count.toLocaleString('en-CA');
-  byId('loading').hidden = true;
+  awaitFirstSort();
   forceRender = true;
   wake();
   toast(`${store.count.toLocaleString('en-CA')} splats in ${((performance.now() - t0) / 1000).toFixed(1)} s. Lighting refines over the next few seconds.`, 4200);
@@ -389,7 +406,7 @@ async function loadCapture(file: File): Promise<void> {
     toast(err instanceof Error ? err.message : 'That file could not be read.', 5000);
     await buildSite();
   }
-  byId('loading').hidden = true;
+  awaitFirstSort();
   forceRender = true;
   wake();
 }

@@ -13,5 +13,6 @@ out vec4 o;
 
 void main() {
   vec3 d = normalize(u_f + v_uv.x * u_th * u_asp * u_r + v_uv.y * u_th * u_u);
-  o = vec4(skyRadiance(d, true), 1.0);
+  // Below the horizon is black until the ground's splats cover it (the grey there is for reflections).
+  o = vec4(d.y < 0.0 ? vec3(0.0) : skyRadiance(d, true), 1.0);
 }
